@@ -10,3 +10,4 @@ venv/
 
 # 训练产物（模型可重新训练得到）
 *.pt
+.git-ca-bundle.pem
