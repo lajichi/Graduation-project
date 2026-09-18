@@ -7,6 +7,7 @@ venv/
 
 # IDE 配置
 .idea/
+.codex/
 
 # 训练产物（模型可重新训练得到）
 *.pt
