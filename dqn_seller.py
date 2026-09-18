@@ -67,13 +67,19 @@ ACTIONS = [0, 2, 5, 10, 15]
 class DQNSeller:
     def __init__(self, seller_bottom=55, max_rounds=10,
                  lr=1e-3, gamma=0.99, eps_start=1.0, eps_end=0.05, eps_decay=500,
-                 batch=32, buffer_size=10000, target_update=100):
+                 batch=32, buffer_size=10000, target_update=100,
+                 step_cost=0.0, learning=True):
         self.bottom = seller_bottom
         self.max_rounds = max_rounds
 
         self.gamma = gamma
         self.batch = batch
         self.target_update = target_update
+        # 每轮的时间成本：>0 时卖家"拖轮次"要付出代价，会更愿意早点成交
+        self.step_cost = step_cost
+        # False = 只推理不学习（评估模式），避免再靠 batch 大小去做 hack
+        self.learning = learning
+        self.last_reward = 0.0
         self.eps_start, self.eps_end, self.eps_decay = eps_start, eps_end, eps_decay
         self.eps = eps_start
         self.step_done = 0
@@ -101,6 +107,7 @@ class DQNSeller:
         self.extalk = 0
         self.rounds = 0
         self.pending = None
+        self.last_reward = 0.0
 
     def _state(self, buyer_offer):
         if self.prev_buyer_offer is not None:
@@ -125,8 +132,15 @@ class DQNSeller:
     # ---- 训练用的主入口（也兼 eval，eval 时 eps 设 0）----
     def decide(self, buyer_offer, seller_bottom):
         self.bottom = seller_bottom
+        # Preserve this value before episode state is updated. It is used for
+        # the non-terminal shaping reward below.
+        buyer_delta = (
+            buyer_offer - self.prev_buyer_offer
+            if self.prev_buyer_offer is not None
+            else 0.0
+        )
         # 买家重复出价计数（Grandet 会触发，是"买家在死扛"的信号）
-        if self.prev_buyer_offer is not None and abs(buyer_offer - self.prev_buyer_offer) < 0.05:
+        if self.prev_buyer_offer is not None and abs(buyer_delta) < 0.05:
             self.extalk += 1
         s = self._state(buyer_offer)
 
@@ -148,25 +162,31 @@ class DQNSeller:
         self.rounds += 1
 
         if accept:
-            reward = new_price - self.bottom
+            # A buyer offer is the transaction price throughout the simulator.
+            # This matches TitForTatSeller's payoff and return-value semantics.
+            reward = buyer_offer - self.bottom
+            self.last_reward = reward
             self.buffer.push(s, a, reward, torch.zeros(6), True)  # 终止，s_next 占位
             self._learn()
         else:
             # shaping：买家这轮加价了多少，按系数给正奖励，引导"等买家加价"
             # Grandet 重复出价 delta=0，shaping=0，不会误导它去磨
-            delta = (buyer_offer - self.prev_buyer_offer) if self.prev_buyer_offer is not None else 0.0
-            reward = 0.3 * delta
+            # step_cost：每多磨一轮扣一点，避免一直拖着等买家让步
+            reward = 0.3 * buyer_delta - self.step_cost
+            self.last_reward = reward
             self.pending = (s, a, reward)  # 等下一轮 s' 收尾
 
-        return "accept" if accept else "offer", new_price
+        return "accept" if accept else "offer", buyer_offer if accept else new_price
 
     # ---- 买家先一步接受时，卖家的上一动作算终止并结算 ----
     def finalize_terminal(self, deal_price):
         """买家直接接受卖家上轮报价，episode 在此终止"""
         if self.pending is None:
+            self.last_reward = 0.0  # 没有待结算的转移，避免重复计奖励
             return
         ps, pa, _pr = self.pending
         reward = deal_price - self.bottom
+        self.last_reward = reward
         self.buffer.push(ps, pa, reward, torch.zeros(6), True)
         self._learn()
         self.pending = None
@@ -174,14 +194,18 @@ class DQNSeller:
     def finalize_crash(self):
         """max_rounds 走完仍没成交"""
         if self.pending is None:
+            self.last_reward = -1.0
             return
         ps, pa, pr = self.pending
+        self.last_reward = -1.0
         self.buffer.push(ps, pa, -1.0, torch.zeros(6), True)  # 谈崩大惩罚
         self._learn()
         self.pending = None
 
     # ---- 学习一步 ----
     def _learn(self):
+        if not self.learning:
+            return
         if len(self.buffer) < self.batch:
             return
         s, a, r, s_next, done = self.buffer.sample(self.batch)
