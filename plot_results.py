@@ -26,6 +26,7 @@ from evaluate_dqn import (  # noqa: E402
     make_tit_for_tat,
     latest_price,
 )
+from pid_seller import make_pid  # noqa: E402
 from simulate import (  # noqa: E402
     BUYER_TOP,
     MAX_ROUNDS,
@@ -37,6 +38,15 @@ from strategies import ConcederBuyer  # noqa: E402
 
 DEFAULT_FIGDIR = Path("figures")
 RESULTS_PATH = Path("results/eval_results.csv")
+
+# 柱状图里卖方出现的顺序与配色；CSV 里没出现的会被自动跳过
+SELLER_ORDER = ["DQN", "Tit-for-Tat", "PID", "PID-离散"]
+SELLER_COLOURS = {
+    "DQN": "#3b6ea5",
+    "Tit-for-Tat": "#c46a3f",
+    "PID": "#3f8f6a",
+    "PID-离散": "#b5a13c",
+}
 
 # 常见中文字体，找到哪个用哪个；都没有就退回英文标签
 CJK_FONTS = [
@@ -118,23 +128,36 @@ def read_results(path=RESULTS_PATH):
 
 def _grouped_bars(rows, outdir, key, low_key, high_key, ylabel, title, filename,
                   percent=False):
+    sellers = []
+    for row in rows:
+        if row["seller"] not in sellers:
+            sellers.append(row["seller"])
+    sellers.sort(key=lambda name: (
+        SELLER_ORDER.index(name) if name in SELLER_ORDER else len(SELLER_ORDER),
+        name,
+    ))
+    tables = {
+        name: {row["buyer"]: row for row in rows if row["seller"] == name}
+        for name in sellers
+    }
+
     buyers = []
     for row in rows:
-        if row["buyer"] not in buyers:
-            buyers.append(row["buyer"])
+        buyer = row["buyer"]
+        if buyer not in buyers and all(buyer in tables[name] for name in sellers):
+            buyers.append(buyer)
+    if not buyers:
+        print(f"没找到可画的卖方数据，跳过 {filename}")
+        return None
 
-    dqn = {row["buyer"]: row for row in rows if row["seller"] == "DQN"}
-    tft = {row["buyer"]: row for row in rows if row["seller"] == "TitForTat"}
-
-    positions = range(len(buyers))
-    width = 0.38
+    positions = list(range(len(buyers)))
+    width = 0.8 / len(sellers)
     scale = 100 if percent else 1
 
     figure, axis = plt.subplots(figsize=(1.6 * len(buyers) + 3, 4.2))
-    for offset, table, label, colour in (
-        (-width / 2, dqn, "DQN", "#3b6ea5"),
-        (width / 2, tft, "Tit-for-Tat", "#c46a3f"),
-    ):
+    for index, label in enumerate(sellers):
+        table = tables[label]
+        offset = -0.4 + width * (index + 0.5)
         values = [float(table[buyer][key]) * scale for buyer in buyers]
         errors = None
         if low_key:
@@ -150,10 +173,11 @@ def _grouped_bars(rows, outdir, key, low_key, high_key, ylabel, title, filename,
             ]
         axis.bar(
             [p + offset for p in positions], values, width,
-            label=label, color=colour, yerr=errors, capsize=3,
+            label=label, color=SELLER_COLOURS.get(label, "#7a7a7a"),
+            yerr=errors, capsize=3,
         )
 
-    axis.set_xticks(list(positions))
+    axis.set_xticks(positions)
     axis.set_xticklabels(buyers, rotation=20, ha="right", fontsize=9)
     axis.set_ylabel(ylabel)
     axis.set_title(title)
@@ -168,7 +192,12 @@ def _grouped_bars(rows, outdir, key, low_key, high_key, ylabel, title, filename,
 
 # ---------- 4. 一局示例的还价轨迹 ----------
 def record_game(seller, buyer, seller_start, seller_bottom):
-    """记录一局里买方的出价和卖方的报价轨迹。"""
+    """记录一局里买方的出价和卖方的报价轨迹。
+
+    卖方接受买方出价时不再往卖方轨迹里追加点——那一步的价格是**成交价**
+    （等于买方出价），画成卖方的"报价"会看起来像临时涨价。
+    成交价由返回值单独给出，画图时用标记点标出。
+    """
     seller.reset(seller_start, MAX_ROUNDS)
     buyer.reset()
     buyer_points = []
@@ -180,9 +209,9 @@ def record_game(seller, buyer, seller_start, seller_bottom):
         if buyer_action == "accept":
             return buyer_points, seller_points, latest_price(seller)
         seller_action, seller_value = seller.decide(buyer_value, seller_bottom)
-        seller_points.append((round_index, seller_value))
         if seller_action == "accept":
             return buyer_points, seller_points, seller_value
+        seller_points.append((round_index, seller_value))
     return buyer_points, seller_points, None
 
 
@@ -196,6 +225,7 @@ def plot_concession_example(outdir, model_path, seller_bottom=50.0,
     for label, factory, colour in (
         ("DQN", lambda: load_dqn(model_path), "#3b6ea5"),
         ("Tit-for-Tat", make_tit_for_tat, "#c46a3f"),
+        ("PID", make_pid, "#3f8f6a"),
     ):
         set_seed(7)  # 两边看到完全相同的对手行为
         buyer = ConcederBuyer(
@@ -216,6 +246,12 @@ def plot_concession_example(outdir, model_path, seller_bottom=50.0,
             [r for r, _ in seller_points], [p for _, p in seller_points],
             where="post", color=colour, linewidth=2, label=label,
         )
+        if deal_price is not None:
+            # 成交点：卖方接受买方出价（或买方接受卖方报价）的位置
+            axis.plot(
+                [len(buyer_points)], [deal_price], marker="o", markersize=6,
+                color=colour, markeredgecolor="white", zorder=5,
+            )
 
     axis.axhline(seller_bottom, color="red", linestyle=":", linewidth=1)
     axis.text(0.1, seller_bottom + 1, L("卖方底价", "Seller bottom"),

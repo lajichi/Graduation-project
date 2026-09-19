@@ -26,6 +26,15 @@ def build_seller(kind, model_path):
         from evaluate_dqn import load_dqn  # 放在函数里，玩 TFT 时不用加载 torch
 
         return load_dqn(model_path), "DQN 卖家（训练了 5000 局）"
+    if kind == "pid":
+        from pid_seller import make_pid  # 放在函数里，玩 TFT 时不用加载控制论模块
+
+        seller = make_pid()
+        coefficients = seller.coefficients()
+        return seller, (
+            f"PID 卖家（k_p={coefficients['kp']}, k_i={coefficients['ki']}, "
+            f"k_d={coefficients['kd']}）"
+        )
     return TitForTatSeller(), "Tit-for-Tat 卖家"
 
 
@@ -77,8 +86,8 @@ def play(seller, seller_name, seller_start, seller_bottom):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="和 AI 卖家谈判")
-    parser.add_argument("--seller", choices=["tft", "dqn"], default="tft",
-                        help="对手类型：tft=手写策略，dqn=训练好的模型")
+    parser.add_argument("--seller", choices=["tft", "dqn", "pid"], default="tft",
+                        help="对手类型：tft=手写策略，dqn=训练好的模型，pid=控制论基线")
     parser.add_argument("--model", default="dqn_seller.pt", help="DQN 模型路径")
     args = parser.parse_args(argv)
 

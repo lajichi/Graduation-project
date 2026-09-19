@@ -1,0 +1,17 @@
+{
+  "kp": 0.12,
+  "ki": 0.02,
+  "kd": 0.3,
+  "discrete": false,
+  "objective": 7.0579,
+  "tuned_on_seed_base": 10000,
+  "tuned_games_per_buyer": 500,
+  "tuned_buyers": [
+    "让步型买方",
+    "时间依赖型买方",
+    "固定报价买方",
+    "反应型买方",
+    "随机加价买方"
+  ],
+  "objective_definition": "feasible_deal_rate * seller_profit"
+}
